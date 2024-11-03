@@ -1,151 +1,81 @@
-import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+import plotly.express as px
+import streamlit as st
+import requests
+from streamlit_autorefresh import st_autorefresh
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# Configuração da página
+st.set_page_config(page_title="Análise de Vendas", page_icon=":bar_chart:", layout="wide")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# Atualização automática
+st_autorefresh(interval=5000, key="data_refresh")
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# Título do dashboard
+st.title('Análise de Vendas')
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+# Carregar dados da planilha Excel
+try:
+    response = requests.get('https://docs.google.com/spreadsheets/d/e/2PACX-1vQt8EOEnxeGbcvhHIz_5ubSFJk9G8ids7B-xW8OpsViI3rQVhMdtKFuXl_Lmrnb8h0jWnaoL0cQK2rR/pub?output=xlsx')
+    response.raise_for_status()
+    xls = pd.ExcelFile(response.content)
+    df = pd.read_excel(xls, sheet_name='Copia de DADOS GERAIS COMERCIAL')
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+    # Processamento de datas e limpeza
+    df['Data da assinatura'] = pd.to_datetime(df['Data da assinatura'], errors='coerce')
+    df['Mês'] = df['Data da assinatura'].dt.to_period('M').astype(str)
+    meses_disponiveis = ["Todos os Períodos"] + sorted(df['Mês'].unique(), reverse=True)
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+    # Barra lateral para selecionar o mês
+    mes_selecionado = st.sidebar.selectbox("Mês", meses_disponiveis)
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+    # Filtrar dados com base na seleção
+    if mes_selecionado == "Todos os Períodos":
+        df_filtrado = df
+    else:
+        df_filtrado = df[df['Mês'] == mes_selecionado]
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    # Exibir principais métricas
+    total_leads = df_filtrado['Number_leads'].count()
+    leads_qualificados = df_filtrado[df_filtrado['Atende aos requisitos'] != '-']['Number_leads'].count()
+    leads_respondidos = df_filtrado[df_filtrado['Respondeu as msgns'] != '-']['Number_leads'].count()
+    propostas_aceitas = df_filtrado[df_filtrado['Aceitou'] != '-']['Number_leads'].count()
+    assinaturas_finalizadas = df_filtrado['Data da assinatura'].count()
 
-    return gdp_df
+    taxa_conversao = (assinaturas_finalizadas / total_leads) * 100 if total_leads else 0
+    taxa_resposta = (leads_respondidos / total_leads) * 100 if total_leads else 0
 
-gdp_df = get_gdp_data()
+    # Colunas para métricas
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Total de Leads", total_leads)
+    col2.metric("Leads Qualificados", leads_qualificados)
+    col3.metric("Leads Respondidos", leads_respondidos)
+    col4.metric("Propostas Aceitas", propostas_aceitas)
+    col5.metric("Assinaturas Finalizadas", assinaturas_finalizadas)
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+    # Gráficos
+    col6, col7, col8 = st.columns(3)
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+    # Gráfico de vendas por consultor
+    vendas_por_consultor = df_filtrado[df_filtrado['Aceitou'] == 'SIM'].groupby('Consultor')['Number_leads'].count().reset_index()
+    fig_consultor = px.bar(vendas_por_consultor, x='Consultor', y='Number_leads', title="Vendas por Consultor", color='Consultor')
+    col6.plotly_chart(fig_consultor, use_container_width=True)
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+    # Funil de vendas
+    funil_dados = {
+        'Etapas': ['Leads', 'Leads Qualificados', 'Leads Respondidos', 'Propostas Aceitas', 'Assinaturas Finalizadas'],
+        'Valores': [total_leads, leads_qualificados, leads_respondidos, propostas_aceitas, assinaturas_finalizadas]
+    }
+    fig_funil = px.funnel(funil_dados, x='Valores', y='Etapas', title="Funil de Vendas")
+    col7.plotly_chart(fig_funil, use_container_width=True)
 
-# Add some spacing
-''
-''
+    # Análise de tempo de fechamento
+    df_filtrado['Tempo de Fechamento'] = (df_filtrado['Data da assinatura'] - df_filtrado['Data da mensagem']).dt.days
+    tempo_medio_fechamento = df_filtrado['Tempo de Fechamento'].mean()
+    col8.metric("Tempo Médio de Fechamento (dias)", f"{tempo_medio_fechamento:.2f}" if not pd.isna(tempo_medio_fechamento) else "N/A")
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+    # Gráfico de distribuição do tempo de fechamento
+    fig_tempo = px.histogram(df_filtrado, x='Tempo de Fechamento', nbins=30, title="Distribuição do Tempo de Fechamento")
+    st.plotly_chart(fig_tempo, use_container_width=True)
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+except Exception as e:
+    st.error(f"Erro ao carregar a planilha: {e}")
